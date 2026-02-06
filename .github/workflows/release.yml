@@ -61,3 +61,83 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: dist/install-ssh-guard.sh
+
+      - name: Auto-complete release notes with usage guide
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'release'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const tag = context.ref.startsWith('refs/tags/')
+              ? context.ref.replace('refs/tags/', '')
+              : (context.payload.release?.tag_name || 'latest');
+
+            let release;
+            try {
+              release = (await github.rest.repos.getReleaseByTag({ owner, repo, tag })).data;
+            } catch (e) {
+              core.info(`No release found for tag ${tag}, skip release-note update.`);
+              return;
+            }
+
+            const marker = '## 使用方法';
+            const usage = [
+              '## 使用方法',
+              '',
+              '### 1) 安装/升级',
+              '```bash',
+              `curl -L https://github.com/${owner}/${repo}/releases/latest/download/install-ssh-guard.sh -o install-ssh-guard.sh`,
+              'chmod +x install-ssh-guard.sh',
+              'sudo ./install-ssh-guard.sh',
+              '```',
+              '',
+              '### 2) 启动',
+              '```bash',
+              'sudo /usr/local/bin/ssh-guard start',
+              '```',
+              '',
+              '### 3) 常用命令',
+              '```bash',
+              'sudo /usr/local/bin/ssh-guard status',
+              'sudo /usr/local/bin/ssh-guard block 1.2.3.4 "manual block"',
+              'sudo /usr/local/bin/ssh-guard blacklist 1.2.3.4 "permanent block"',
+              'sudo /usr/local/bin/ssh-guard whitelist 1.2.3.4',
+              'sudo /usr/local/bin/ssh-guard unblock 1.2.3.4',
+              '```',
+              '',
+              '### 4) Docker（可选）',
+              '```bash',
+              `docker pull ghcr.io/${owner}/${repo}:${tag}`,
+              'docker run --rm -it --privileged --net=host \\',
+              '  -v /var/log:/var/log \\',
+              '  -v /etc/ssh-guard:/etc/ssh-guard \\',
+              `  ghcr.io/${owner}/${repo}:${tag}`,
+              '```',
+              '',
+              '### 5) 依赖与注意事项',
+              '- 需要 root 权限。',
+              '- 依赖：iptables、tcpdump、ss 或 netstat。',
+              '- 若缺少 tcpdump：端口扫描检测自动禁用。',
+              '- 若缺少 ss/netstat：端口扫描封禁逻辑自动停用，避免误封正常流量。',
+              '- IP 解封时会发送邮件提醒。'
+            ].join('\n');
+
+            const currentBody = release.body || '';
+            if (currentBody.includes(marker)) {
+              core.info('Release notes already include usage section, skip append.');
+              return;
+            }
+
+            const body = currentBody.trim()
+              ? `${currentBody.trim()}\n\n${usage}`
+              : usage;
+
+            await github.rest.repos.updateRelease({
+              owner,
+              repo,
+              release_id: release.id,
+              body,
+              name: release.name || tag,
+            });
+            core.info(`Release notes updated for ${tag}.`);

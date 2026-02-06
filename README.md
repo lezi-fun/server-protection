@@ -30,6 +30,8 @@ sudo ./install-ssh-guard.sh
 sudo /usr/local/bin/ssh-guard start
 sudo /usr/local/bin/ssh-guard status
 sudo /usr/local/bin/ssh-guard block 1.2.3.4 "手动封禁"
+sudo /usr/local/bin/ssh-guard blacklist 1.2.3.4 "永久拉黑"
+sudo /usr/local/bin/ssh-guard whitelist 1.2.3.4
 sudo /usr/local/bin/ssh-guard unblock 1.2.3.4
 ```
 
@@ -79,12 +81,14 @@ docker run --rm -it \\
 
 ## 配置说明
 
-在脚本顶部修改配置即可：
+支持通过 `install.sh` 一键配置（推荐），也可在脚本顶部手动修改：
 
 - `TO_EMAIL`：告警接收邮箱
 - `FAILED_THRESHOLD` / `TIME_WINDOW`：SSH 失败登录封禁阈值
 - `PORTSCAN_PORT_THRESHOLD` / `PORTSCAN_TIME_WINDOW`：端口扫描封禁阈值
 - `PORTSCAN_BLOCK_DURATION`：端口扫描封禁时长（秒）
+- `REPORT_INTERVAL`：邮件报告发送频率（秒）
+- `WHITELIST_IPS_EXTRA`：额外白名单（空格分隔，或写入 `/etc/ssh-guard/whitelist.list`）
 
 ## 依赖
 
@@ -97,4 +101,6 @@ docker run --rm -it \\
 
 - 需要 root 权限运行。
 - 如果系统未安装 `tcpdump`，端口扫描检测会自动禁用并写入状态日志。
+- 如果系统未安装 `ss`/`netstat`，端口扫描封禁逻辑会自动停用，避免误封正常流量。
+- 每次 IP 解封（手动/自动）都会发送邮件提醒。
 - SMTP 模式需提前配置 `msmtp` 账号信息（如 `/etc/msmtprc`）。

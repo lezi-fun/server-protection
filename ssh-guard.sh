@@ -21,11 +21,17 @@ PORTSCAN_BLOCK_DURATION=120   # 端口扫描封禁时长（秒）
 PORTSCAN_OPEN_PORT_REFRESH=300 # 开放端口刷新间隔（秒）
 
 # 白名单IP（不会被封禁）
-WHITELIST_IPS=("127.0.0.1" "::1" "192.168.0.0/16" "10.0.0.0/8" "172.16.0.0/12")
+DEFAULT_WHITELIST_IPS=("127.0.0.1" "::1" "192.168.0.0/16" "10.0.0.0/8" "172.16.0.0/12")
+WHITELIST_IPS=("${DEFAULT_WHITELIST_IPS[@]}")
 
 # 日志目录
 LOG_DIR="/var/log/ssh-guardian"
 LOCK_DIR="/tmp/ssh-guardian"
+
+# 配置文件路径
+CONFIG_DIR="/etc/ssh-guard"
+SSH_GUARD_CONFIG_FILE="$CONFIG_DIR/ssh-guard.conf"
+WHITELIST_FILE="$CONFIG_DIR/whitelist.list"
 # ==================== 配置结束 ====================
 
 # 颜色定义
@@ -34,6 +40,49 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
+
+# 加载运行时配置
+load_runtime_config() {
+    if [ -f "$SSH_GUARD_CONFIG_FILE" ]; then
+        # shellcheck disable=SC1090
+        source "$SSH_GUARD_CONFIG_FILE"
+    fi
+
+    WHITELIST_IPS=("${DEFAULT_WHITELIST_IPS[@]}")
+
+    if [ -f "$WHITELIST_FILE" ]; then
+        while read -r ip; do
+            [ -n "$ip" ] && WHITELIST_IPS+=("$ip")
+        done < <(grep -v '^#' "$WHITELIST_FILE" 2>/dev/null | sed '/^\s*$/d')
+    fi
+
+    if [ -n "${WHITELIST_IPS_EXTRA:-}" ]; then
+        local extra_ip
+        for extra_ip in $WHITELIST_IPS_EXTRA; do
+            [ -n "$extra_ip" ] && WHITELIST_IPS+=("$extra_ip")
+        done
+    fi
+}
+
+ensure_whitelist_file_exists() {
+    mkdir -p "$CONFIG_DIR"
+    touch "$WHITELIST_FILE"
+}
+
+add_whitelist_ip() {
+    local ip="$1"
+
+    if is_whitelisted "$ip"; then
+        echo "$(date '+%Y-%m-%d %H:%M:%S') - 白名单已存在IP: $ip" >> "$LOG_DIR/skipped.log"
+        return 1
+    fi
+
+    ensure_whitelist_file_exists
+    echo "$ip" >> "$WHITELIST_FILE"
+    WHITELIST_IPS+=("$ip")
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - 添加白名单IP: $ip" >> "$LOG_DIR/status.log"
+    return 0
+}
 
 # 初始化函数
 init_system() {
@@ -216,21 +265,45 @@ block_ip() {
 unblock_ip() {
     local ip="$1"
     local reason="$2"
-    
+    local was_blocked=0
+
+    if iptables -L INPUT -n 2>/dev/null | grep -q "DROP.*$ip"; then
+        was_blocked=1
+    fi
+
+    if [ -f "$LOG_DIR/blocked.list" ] && grep -q "^$ip|" "$LOG_DIR/blocked.list" 2>/dev/null; then
+        was_blocked=1
+    fi
+
     # 从iptables移除
     iptables -D INPUT -s "$ip" -j DROP 2>/dev/null
-    
+
     # 从封禁列表移除
     if [ -f "$LOG_DIR/blocked.list" ]; then
         grep -v "^$ip|" "$LOG_DIR/blocked.list" > "$LOG_DIR/blocked.list.tmp"
         mv "$LOG_DIR/blocked.list.tmp" "$LOG_DIR/blocked.list"
     fi
-    
+
+    if [ "$was_blocked" -eq 0 ]; then
+        echo -e "${YELLOW}[!] IP未封禁: $ip${NC}"
+        return 1
+    fi
+
     # 记录日志
-    echo "$(date '+%Y-%m-%d %H:%M:%S') - 解封IP: $ip (原因: $reason)" >> "$LOG_DIR/unblocked.log"
-    
+    local timestamp
+    timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    echo "$timestamp - 解封IP: $ip (原因: $reason)" >> "$LOG_DIR/unblocked.log"
+
     echo -e "${GREEN}[✓] 已解封IP: $ip${NC}"
-    
+
+    local subject="🔓 安全通知 - $ip 已解封"
+    local body="IP地址: $ip
+解封时间: $timestamp
+解封原因: $reason
+服务器: $HOSTNAME
+"
+    ( send_email "$subject" "$body" "normal" ) &
+
     return 0
 }
 
@@ -356,7 +429,10 @@ refresh_open_tcp_ports() {
         done < <(netstat -tuln 2>/dev/null | awk 'NR>2 {print $4}' | awk -F':' '{print $NF}' | sort -u)
     else
         echo "$(date) - 警告: 未找到 ss 或 netstat，无法刷新开放端口列表" >> "$LOG_DIR/status.log"
+        return 1
     fi
+
+    return 0
 }
 
 # 监控端口扫描
@@ -375,7 +451,10 @@ monitor_port_scans() {
     local last_port_refresh=0
     local last_local_refresh=0
 
-    refresh_open_tcp_ports
+    if ! refresh_open_tcp_ports; then
+        echo "$(date) - 警告: 开放端口列表不可用，已禁用端口扫描封禁逻辑以避免误封" >> "$LOG_DIR/status.log"
+        return 0
+    fi
     refresh_local_ips
     last_port_refresh=$(date +%s)
     last_local_refresh=$(date +%s)
@@ -385,7 +464,10 @@ monitor_port_scans() {
         current_time=$(date +%s)
 
         if [ $((current_time - last_port_refresh)) -ge "$PORTSCAN_OPEN_PORT_REFRESH" ]; then
-            refresh_open_tcp_ports
+            if ! refresh_open_tcp_ports; then
+                echo "$(date) - 警告: 开放端口列表刷新失败，停止端口扫描监控以避免误封" >> "$LOG_DIR/status.log"
+                break
+            fi
             last_port_refresh=$current_time
         fi
 
@@ -675,6 +757,30 @@ manage_commands() {
             local reason="${3:-手动封禁}"
             block_ip "$ip" "$reason" "manual"
             ;;
+        "blacklist")
+            if [ -z "$2" ]; then
+                echo "用法: $0 blacklist <IP地址> [原因]"
+                return 1
+            fi
+            local ip="$2"
+            local reason="${3:-手动拉黑}"
+            block_ip "$ip" "$reason" "manual" 0
+            ;;
+        "whitelist")
+            if [ -z "$2" ]; then
+                echo "用法: $0 whitelist <IP地址>"
+                return 1
+            fi
+            local ip="$2"
+            if add_whitelist_ip "$ip"; then
+                echo -e "${GREEN}[✓] 已添加白名单IP: $ip${NC}"
+                if is_ip_blocked "$ip"; then
+                    unblock_ip "$ip" "加入白名单自动解封"
+                fi
+            else
+                echo -e "${YELLOW}[!] 白名单IP已存在: $ip${NC}"
+            fi
+            ;;
         "unblock")
             if [ -z "$2" ]; then
                 echo "用法: $0 unblock <IP地址>"
@@ -724,7 +830,7 @@ manage_commands() {
         "help")
             echo -e "${BLUE}=== SSH防护系统帮助 ===${NC}"
             echo ""
-            echo "用法: $0 {start|stop|status|test|block|unblock|list|clear|logs|config|help}"
+            echo "用法: $0 {start|stop|status|test|block|blacklist|whitelist|unblock|list|clear|logs|config|help}"
             echo ""
             echo "命令说明:"
             echo "  start     启动监控"
@@ -732,6 +838,8 @@ manage_commands() {
             echo "  status    查看系统状态"
             echo "  test      发送测试邮件"
             echo "  block     手动封禁IP (示例: $0 block 1.2.3.4 '恶意扫描')"
+            echo "  blacklist 永久封禁IP (示例: $0 blacklist 1.2.3.4 '恶意扫描')"
+            echo "  whitelist 添加白名单IP (示例: $0 whitelist 1.2.3.4)"
             echo "  unblock   手动解封IP (示例: $0 unblock 1.2.3.4)"
             echo "  list      查看封禁列表"
             echo "  clear     清除所有封禁"
@@ -743,7 +851,9 @@ manage_commands() {
             echo "  $0 start              # 启动监控"
             echo "  $0 test               # 测试邮件发送"
             echo "  $0 status             # 查看系统状态"
-            echo "  $0 block 1.2.3.4      # 封禁IP"
+            echo "  $0 block 1.2.3.4      # 临时封禁IP"
+            echo "  $0 blacklist 1.2.3.4  # 永久封禁IP"
+            echo "  $0 whitelist 1.2.3.4  # 添加白名单"
             echo "  $0 logs               # 查看实时日志"
             ;;
         *)
@@ -761,11 +871,13 @@ main() {
         exit 1
     fi
     
+    load_runtime_config
+
     if [ $# -eq 0 ]; then
         manage_commands "help"
         exit 1
     fi
-    
+
     manage_commands "$@"
 }
 
