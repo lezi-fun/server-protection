@@ -10,7 +10,7 @@
 
 ```bash
 wget https://raw.githubusercontent.com/lezi-fun/server-protection/refs/heads/main/install.sh
-sudo ./install.sh
+sudo bash ./install.sh
 ```
 
 安装后命令路径为 `/usr/local/bin/ssh-guard`。
