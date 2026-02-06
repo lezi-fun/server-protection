@@ -9,7 +9,7 @@
 ## 一键安装
 
 ```bash
-wget https://raw.githubusercontent.com/lezi-fun/server-protection/refs/heads/main/ssh-guard.sh
+wget https://raw.githubusercontent.com/lezi-fun/server-protection/refs/heads/main/install.sh
 sudo ./install.sh
 ```
 
