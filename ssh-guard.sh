@@ -416,6 +416,35 @@ is_local_ip() {
     return 1
 }
 
+# 检查是否为IPv4地址
+is_ipv4() {
+    local ip="$1"
+    [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]
+}
+
+# 从 tcpdump 的 SYN 日志中提取源IP和目标端口
+parse_tcpdump_syn_line() {
+    local line="$1"
+    local normalized="$line"
+
+    # 在 any 网卡抓包时，部分系统会出现 "In IP" / "Out IP" 前缀
+    normalized="$(echo "$normalized" | sed -E 's/\b(In|Out)\s+IP\s+/IP /')"
+
+    # 仅处理 IPv4 行，避免 IPv6 或异常格式误判
+    if [[ ! "$normalized" =~ IP[[:space:]]+([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)\.([0-9]+)[[:space:]]*\>[[:space:]]*([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)\.([0-9]+): ]]; then
+        return 1
+    fi
+
+    local src="${BASH_REMATCH[1]}"
+    local dst_port="${BASH_REMATCH[4]}"
+
+    if ! is_ipv4 "$src"; then
+        return 1
+    fi
+
+    echo "$src|$dst_port"
+}
+
 # 刷新开放端口列表
 refresh_open_tcp_ports() {
     OPEN_TCP_PORTS=()
@@ -485,14 +514,14 @@ monitor_port_scans() {
             last_cleanup_time=$current_time
         fi
 
-        local src
-        local dst_port
-        src=$(echo "$line" | awk '{print $3}' | sed 's/\.[0-9]*$//')
-        dst_port=$(echo "$line" | awk '{print $5}' | sed 's/.*\.//; s/://')
-
-        if [ -z "$src" ] || [ -z "$dst_port" ]; then
+        local parsed
+        parsed="$(parse_tcpdump_syn_line "$line")"
+        if [ -z "$parsed" ]; then
             continue
         fi
+
+        local src="${parsed%%|*}"
+        local dst_port="${parsed##*|}"
 
         if is_local_ip "$src"; then
             continue
