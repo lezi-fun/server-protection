@@ -14,6 +14,15 @@ sudo ./install.sh
 
 安装后命令路径为 `/usr/local/bin/ssh-guard`。
 安装脚本会提示选择 `smtp` 或 `resend` 并生成 `/etc/ssh-guard/mail.conf`。
+安装脚本也支持选择 `docker` 部署（可通过环境变量 `SSH_GUARD_IMAGE` 指定镜像地址）。
+
+也可以从 Release 下载一键安装脚本：
+
+```bash
+curl -L https://github.com/<owner>/<repo>/releases/latest/download/install-ssh-guard.sh -o install-ssh-guard.sh
+chmod +x install-ssh-guard.sh
+sudo ./install-ssh-guard.sh
+```
 
 ## 使用方式
 
@@ -22,6 +31,50 @@ sudo /usr/local/bin/ssh-guard start
 sudo /usr/local/bin/ssh-guard status
 sudo /usr/local/bin/ssh-guard block 1.2.3.4 "手动封禁"
 sudo /usr/local/bin/ssh-guard unblock 1.2.3.4
+```
+
+## 容器运行示例
+
+> 说明：封禁和抓包需要访问宿主机网络与防火墙规则，建议使用 `--privileged` 与 `--net=host`。
+
+镜像拉取与运行示例（GHCR）：
+
+```bash
+docker pull ghcr.io/<owner>/<repo>:latest
+```
+
+```bash
+docker run --rm -it \
+  --privileged \
+  --net=host \
+  -v /var/log:/var/log \
+  -v /etc/ssh-guard:/etc/ssh-guard \
+  ghcr.io/<owner>/<repo>:latest
+```
+
+```bash
+docker build -t ssh-guard:local .
+```
+
+```bash
+docker run --rm -it \\
+  --privileged \\
+  --net=host \\
+  -v /var/log:/var/log \\
+  -v /etc/ssh-guard:/etc/ssh-guard \\
+  ssh-guard:local
+```
+
+如果需要进入容器手动执行命令，可覆盖默认入口：
+
+```bash
+docker run --rm -it \\
+  --privileged \\
+  --net=host \\
+  -v /var/log:/var/log \\
+  -v /etc/ssh-guard:/etc/ssh-guard \\
+  --entrypoint bash \\
+  ssh-guard:local
 ```
 
 ## 配置说明
