@@ -1,6 +1,8 @@
 #!/bin/bash
-# send_email.sh - 使用msmtp发送邮件的脚本
+# send_email.sh - 使用SMTP或Resend发送邮件的脚本
 # 用法: ./send_email.sh title.txt body.txt recipient@example.com
+
+CONFIG_FILE="/etc/ssh-guard/mail.conf"
 
 # 颜色定义
 RED='\033[0;31m'
@@ -32,13 +34,38 @@ show_help() {
     echo "  $0 -c cc@example.com -b bcc@example.com title.txt body.txt user@example.com"
 }
 
+# 读取配置
+load_config() {
+    if [[ -f "$CONFIG_FILE" ]]; then
+        # shellcheck disable=SC1090
+        source "$CONFIG_FILE"
+    fi
+
+    MAIL_PROVIDER="${MAIL_PROVIDER:-smtp}"
+}
+
 # 检查依赖
 check_dependencies() {
-    if ! command -v msmtp &> /dev/null; then
-        echo -e "${RED}错误: 未找到 msmtp 命令${NC}"
-        echo "请安装 msmtp:"
-        echo "  Ubuntu/Debian: sudo apt install msmtp msmtp-mta"
-        echo "  CentOS/RHEL: sudo yum install msmtp"
+    if [[ "$MAIL_PROVIDER" == "smtp" ]]; then
+        if ! command -v msmtp &> /dev/null; then
+            echo -e "${RED}错误: 未找到 msmtp 命令${NC}"
+            echo "请安装 msmtp:"
+            echo "  Ubuntu/Debian: sudo apt install msmtp msmtp-mta"
+            echo "  CentOS/RHEL: sudo yum install msmtp"
+            exit 1
+        fi
+    elif [[ "$MAIL_PROVIDER" == "resend" ]]; then
+        if ! command -v curl &> /dev/null; then
+            echo -e "${RED}错误: 未找到 curl 命令${NC}"
+            echo "请安装 curl"
+            exit 1
+        fi
+        if [[ -z "${RESEND_API_KEY:-}" || -z "${RESEND_FROM:-}" ]]; then
+            echo -e "${RED}错误: Resend 配置缺失，请设置 RESEND_API_KEY 与 RESEND_FROM${NC}"
+            exit 1
+        fi
+    else
+        echo -e "${RED}错误: 未知邮件服务类型: $MAIL_PROVIDER${NC}"
         exit 1
     fi
     
@@ -305,33 +332,88 @@ send_with_mutt() {
     return $result
 }
 
+# 使用Resend发送邮件
+send_with_resend() {
+    local subject
+    local body
+    subject=$(cat "$title_file" | tr -d '\n\r')
+    body=$(cat "$body_file")
+
+    if [[ ${#attachments[@]} -gt 0 ]]; then
+        echo -e "${YELLOW}警告: Resend 发送暂不支持附件，将忽略附件${NC}"
+    fi
+
+    if $verbose; then
+        echo -e "${BLUE}使用 Resend 发送邮件...${NC}"
+    fi
+
+    local payload
+    payload=$(cat <<EOF
+{
+  "from": "${RESEND_FROM}",
+  "to": ["${recipient}"],
+  "subject": "${subject}",
+  "text": "${body}"
+}
+EOF
+)
+
+    local response
+    response=$(curl -sS -X POST "https://api.resend.com/emails" \
+        -H "Authorization: Bearer ${RESEND_API_KEY}" \
+        -H "Content-Type: application/json" \
+        -d "$payload")
+
+    if echo "$response" | grep -q '"id"'; then
+        echo -e "${GREEN}✓ 邮件发送成功！${NC}"
+        if $verbose; then
+            echo "收件人: $recipient"
+            echo "标题: $subject"
+        fi
+        return 0
+    fi
+
+    echo -e "${RED}✗ 邮件发送失败！响应: $response${NC}"
+    return 1
+}
+
 # 主函数
 main() {
+    load_config
     parse_args "$@"
+    if [[ -z "$sender" && -n "${SMTP_FROM:-}" ]]; then
+        sender="$SMTP_FROM"
+    fi
     check_dependencies
     validate_files
     
     # 记录开始时间
     local start_time=$(date +%s)
     
-    # 根据是否有附件选择发送方式
-    if [[ ${#attachments[@]} -gt 0 ]] && command -v mutt &> /dev/null; then
-        send_with_mutt
-    else
-        if [[ ${#attachments[@]} -gt 0 ]]; then
-            echo -e "${YELLOW}警告: 检测到附件但未安装mutt，将发送不带附件的邮件${NC}"
-        fi
-        
-        email_file=$(create_email_file)
-        
-        # 确保临时文件被清理
-        trap "rm -f '$email_file'" EXIT
-        
-        send_with_msmtp "$email_file"
+    if [[ "$MAIL_PROVIDER" == "resend" ]]; then
+        send_with_resend
         local result=$?
-        
-        # 清理临时文件
-        rm -f "$email_file"
+    else
+        # 根据是否有附件选择发送方式
+        if [[ ${#attachments[@]} -gt 0 ]] && command -v mutt &> /dev/null; then
+            send_with_mutt
+            local result=$?
+        else
+            if [[ ${#attachments[@]} -gt 0 ]]; then
+                echo -e "${YELLOW}警告: 检测到附件但未安装mutt，将发送不带附件的邮件${NC}"
+            fi
+            
+            email_file=$(create_email_file)
+            
+            # 确保临时文件被清理
+            trap "rm -f '$email_file'" EXIT
+            
+            send_with_msmtp "$email_file"
+            local result=$?
+            
+            # 清理临时文件
+            rm -f "$email_file"
+        fi
     fi
     
     # 计算执行时间
