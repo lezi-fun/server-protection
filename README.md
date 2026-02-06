@@ -9,6 +9,7 @@
 ## 一键安装
 
 ```bash
+wget https://raw.githubusercontent.com/lezi-fun/server-protection/refs/heads/main/ssh-guard.sh
 sudo ./install.sh
 ```
 
@@ -19,7 +20,7 @@ sudo ./install.sh
 也可以从 Release 下载一键安装脚本：
 
 ```bash
-curl -L https://github.com/<owner>/<repo>/releases/latest/download/install-ssh-guard.sh -o install-ssh-guard.sh
+curl -L https://github.com/lezi-fun/server-protection/releases/latest/download/install-ssh-guard.sh -o install-ssh-guard.sh
 chmod +x install-ssh-guard.sh
 sudo ./install-ssh-guard.sh
 ```
@@ -42,7 +43,7 @@ sudo /usr/local/bin/ssh-guard unblock 1.2.3.4
 镜像拉取与运行示例（GHCR）：
 
 ```bash
-docker pull ghcr.io/<owner>/<repo>:latest
+docker pull ghcr.io/lezi-fun/server-protection:latest
 ```
 
 ```bash
@@ -51,7 +52,7 @@ docker run --rm -it \
   --net=host \
   -v /var/log:/var/log \
   -v /etc/ssh-guard:/etc/ssh-guard \
-  ghcr.io/<owner>/<repo>:latest
+  ghcr.io/lezi-fun/server-protection:latest
 ```
 
 ```bash
