@@ -7,6 +7,7 @@ INSTALL_PATH="/usr/local/bin/ssh-guard"
 SENDMAIL_PATH="/usr/local/bin/sendmail.sh"
 CONFIG_DIR="/etc/ssh-guard"
 CONFIG_FILE="$CONFIG_DIR/mail.conf"
+SSH_GUARD_CONF_FILE="$CONFIG_DIR/ssh-guard.conf"
 DEFAULT_IMAGE="ghcr.io/<owner>/<repo>:latest"
 IMAGE="${SSH_GUARD_IMAGE:-$DEFAULT_IMAGE}"
 CONTAINER_NAME="${SSH_GUARD_CONTAINER_NAME:-ssh-guard}"
@@ -15,6 +16,17 @@ if [ "$(id -u)" -ne 0 ]; then
     echo "请使用 root 权限运行: sudo $0"
     exit 1
 fi
+
+read_with_default() {
+    local prompt="$1"
+    local default="$2"
+    local value
+    read -r -p "$prompt [$default]: " value
+    if [ -z "$value" ]; then
+        value="$default"
+    fi
+    echo "$value"
+}
 
 deploy_with_docker() {
     if ! command -v docker >/dev/null 2>&1; then
@@ -88,5 +100,34 @@ EOF
     echo "请确保已配置 msmtp 账号信息（例如 /etc/msmtprc 或 ~/.msmtprc）"
 fi
 
+echo "[*] 配置 ssh-guard 自定义参数（可直接回车使用默认值）"
+TO_EMAIL=$(read_with_default "告警接收邮箱 TO_EMAIL" "admin@example.com")
+FAILED_THRESHOLD=$(read_with_default "失败封禁阈值 FAILED_THRESHOLD" "5")
+TIME_WINDOW=$(read_with_default "失败统计窗口(秒) TIME_WINDOW" "600")
+BLOCK_DURATION=$(read_with_default "默认封禁时长(秒,0=永久) BLOCK_DURATION" "86400")
+REPORT_INTERVAL=$(read_with_default "报告发送频率(秒) REPORT_INTERVAL" "60")
+PORTSCAN_PORT_THRESHOLD=$(read_with_default "端口扫描阈值(端口数) PORTSCAN_PORT_THRESHOLD" "100")
+PORTSCAN_TIME_WINDOW=$(read_with_default "端口扫描统计窗口(秒) PORTSCAN_TIME_WINDOW" "120")
+PORTSCAN_BLOCK_DURATION=$(read_with_default "端口扫描封禁时长(秒,0=永久) PORTSCAN_BLOCK_DURATION" "120")
+PORTSCAN_OPEN_PORT_REFRESH=$(read_with_default "开放端口刷新间隔(秒) PORTSCAN_OPEN_PORT_REFRESH" "300")
+WHITELIST_IPS_EXTRA=$(read_with_default "额外白名单(空格分隔，可留空) WHITELIST_IPS_EXTRA" "")
+
+cat > "$SSH_GUARD_CONF_FILE" <<EOF
+TO_EMAIL=${TO_EMAIL}
+FAILED_THRESHOLD=${FAILED_THRESHOLD}
+TIME_WINDOW=${TIME_WINDOW}
+BLOCK_DURATION=${BLOCK_DURATION}
+REPORT_INTERVAL=${REPORT_INTERVAL}
+PORTSCAN_PORT_THRESHOLD=${PORTSCAN_PORT_THRESHOLD}
+PORTSCAN_TIME_WINDOW=${PORTSCAN_TIME_WINDOW}
+PORTSCAN_BLOCK_DURATION=${PORTSCAN_BLOCK_DURATION}
+PORTSCAN_OPEN_PORT_REFRESH=${PORTSCAN_OPEN_PORT_REFRESH}
+WHITELIST_IPS_EXTRA="${WHITELIST_IPS_EXTRA}"
+EOF
+
+touch "$CONFIG_DIR/whitelist.list"
+
+echo "[✓] ssh-guard 配置已写入 $SSH_GUARD_CONF_FILE"
+echo "[✓] 可在 $CONFIG_DIR/whitelist.list 中维护额外白名单IP（每行一个）"
 echo "[✓] 安装完成"
 echo "使用方式: $INSTALL_PATH start"
