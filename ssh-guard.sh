@@ -1,10 +1,11 @@
 #!/bin/bash
-# /usr/local/bin/ssh-guardian.sh
+# /usr/local/bin/ssh-guard.sh
 
 # ==================== 配置区域 ====================
 # 这里修改配置即可，不需要修改系统配置
 TO_EMAIL="admin@568131.xyz"          # 接收警报的邮箱
 HOSTNAME=$(hostname)                 # 主机名
+SCRIPT_NAME=$(basename "$0")         # 脚本名
 
 # 防护配置
 FAILED_THRESHOLD=5      # 触发封禁的失败次数
@@ -12,6 +13,12 @@ TIME_WINDOW=600          # 统计时间窗口（秒）
 BLOCK_DURATION=86400     # 封禁时长（秒），86400=24小时
 REPORT_INTERVAL=60       # 报告间隔（秒）
 CLEANUP_INTERVAL=3600    # 清理间隔（秒）
+
+# 端口扫描防护配置
+PORTSCAN_PORT_THRESHOLD=100   # 触发封禁的不同端口数量
+PORTSCAN_TIME_WINDOW=120      # 端口扫描时间窗口（秒）
+PORTSCAN_BLOCK_DURATION=120   # 端口扫描封禁时长（秒）
+PORTSCAN_OPEN_PORT_REFRESH=300 # 开放端口刷新间隔（秒）
 
 # 白名单IP（不会被封禁）
 WHITELIST_IPS=("127.0.0.1" "::1" "192.168.0.0/16" "10.0.0.0/8" "172.16.0.0/12")
@@ -42,6 +49,7 @@ init_system() {
     touch "$LOG_DIR/report.log"      # 报告记录
     touch "$LOG_DIR/email.log"       # 邮件发送记录
     touch "$LOG_DIR/status.log"      # 状态记录
+    touch "$LOG_DIR/portscan.log"    # 端口扫描记录
     
     # 创建封禁列表文件
     touch "$LOG_DIR/blocked.list"
@@ -154,6 +162,7 @@ block_ip() {
     local ip="$1"
     local reason="$2"
     local count="$3"
+    local block_duration="${4:-$BLOCK_DURATION}"
     
     # 检查白名单
     if is_whitelisted "$ip"; then
@@ -169,8 +178,8 @@ block_ip() {
     
     # 计算解封时间
     local block_until="permanent"
-    if [ "$BLOCK_DURATION" -gt 0 ]; then
-        block_until=$(($(date +%s) + BLOCK_DURATION))
+    if [ "$block_duration" -gt 0 ]; then
+        block_until=$(($(date +%s) + block_duration))
     fi
     
     # 添加到封禁列表
@@ -186,8 +195,8 @@ block_ip() {
     echo -e "${RED}[!] 已封禁IP: $ip${NC}"
     
     # 发送邮件通知
-    local subject="🚨 SSH攻击警报 - $ip 已被封禁"
-    local body="IP地址: $ip\n封禁时间: $timestamp\n封禁原因: $reason\n失败次数: $count\n服务器: $HOSTNAME\n\n"
+    local subject="🚨 安全警报 - $ip 已被封禁"
+    local body="IP地址: $ip\n封禁时间: $timestamp\n封禁原因: $reason\n触发次数: $count\n服务器: $HOSTNAME\n\n"
     
     if [ "$block_until" != "permanent" ]; then
         body+="解封时间: $(date -d @"$block_until" '+%Y-%m-%d %H:%M:%S')\n"
@@ -195,7 +204,7 @@ block_ip() {
         body+="封禁类型: 永久封禁\n"
     fi
     
-    body+="\n建议操作:\n1. 检查是否有合法用户被误封\n2. 如需解封，请使用命令: ssh-guardian.sh unblock $ip"
+    body+="\n建议操作:\n1. 检查是否有合法用户被误封\n2. 如需解封，请使用命令: ${SCRIPT_NAME} unblock $ip"
     
     # 异步发送邮件，不阻塞主进程
     ( send_email "$subject" "$body" "high" ) &
@@ -312,12 +321,155 @@ get_uptime() {
     fi
 }
 
+# 刷新本机IP列表
+refresh_local_ips() {
+    LOCAL_IPS=()
+    while read -r ip; do
+        [ -n "$ip" ] && LOCAL_IPS+=("$ip")
+    done < <(hostname -I 2>/dev/null | tr ' ' '\n')
+    LOCAL_IPS+=("127.0.0.1")
+}
+
+# 判断是否为本机IP
+is_local_ip() {
+    local ip="$1"
+
+    for local_ip in "${LOCAL_IPS[@]}"; do
+        if [ "$ip" = "$local_ip" ]; then
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+# 刷新开放端口列表
+refresh_open_tcp_ports() {
+    OPEN_TCP_PORTS=()
+    if command -v ss >/dev/null 2>&1; then
+        while read -r port; do
+            [ -n "$port" ] && OPEN_TCP_PORTS["$port"]=1
+        done < <(ss -tuln | awk 'NR>1 {print $5}' | awk -F':' '{print $NF}' | sort -u)
+    elif command -v netstat >/dev/null 2>&1; then
+        while read -r port; do
+            [ -n "$port" ] && OPEN_TCP_PORTS["$port"]=1
+        done < <(netstat -tuln 2>/dev/null | awk 'NR>2 {print $4}' | awk -F':' '{print $NF}' | sort -u)
+    else
+        echo "$(date) - 警告: 未找到 ss 或 netstat，无法刷新开放端口列表" >> "$LOG_DIR/status.log"
+    fi
+}
+
+# 监控端口扫描
+monitor_port_scans() {
+    local report_file="$1"
+
+    if ! command -v tcpdump >/dev/null 2>&1; then
+        echo "$(date) - 警告: 未找到 tcpdump，无法启用端口扫描监控" >> "$LOG_DIR/status.log"
+        return 0
+    fi
+
+    declare -A scan_port_times
+    declare -A OPEN_TCP_PORTS
+    declare -a LOCAL_IPS
+    local last_cleanup_time=$(date +%s)
+    local last_port_refresh=0
+    local last_local_refresh=0
+
+    refresh_open_tcp_ports
+    refresh_local_ips
+    last_port_refresh=$(date +%s)
+    last_local_refresh=$(date +%s)
+
+    tcpdump -l -nn -i any 'tcp[tcpflags] & (tcp-syn) != 0 and tcp[tcpflags] & (tcp-ack) == 0' 2>/dev/null | while read -r line; do
+        local current_time
+        current_time=$(date +%s)
+
+        if [ $((current_time - last_port_refresh)) -ge "$PORTSCAN_OPEN_PORT_REFRESH" ]; then
+            refresh_open_tcp_ports
+            last_port_refresh=$current_time
+        fi
+
+        if [ $((current_time - last_local_refresh)) -ge "$PORTSCAN_OPEN_PORT_REFRESH" ]; then
+            refresh_local_ips
+            last_local_refresh=$current_time
+        fi
+
+        if [ $((current_time - last_cleanup_time)) -ge "$PORTSCAN_TIME_WINDOW" ]; then
+            for key in "${!scan_port_times[@]}"; do
+                if [ $((current_time - scan_port_times[$key])) -gt "$PORTSCAN_TIME_WINDOW" ]; then
+                    unset scan_port_times["$key"]
+                fi
+            done
+            last_cleanup_time=$current_time
+        fi
+
+        local src
+        local dst_port
+        src=$(echo "$line" | awk '{print $3}' | sed 's/\.[0-9]*$//')
+        dst_port=$(echo "$line" | awk '{print $5}' | sed 's/.*\.//; s/://')
+
+        if [ -z "$src" ] || [ -z "$dst_port" ]; then
+            continue
+        fi
+
+        if is_local_ip "$src"; then
+            continue
+        fi
+
+        if is_whitelisted "$src"; then
+            continue
+        fi
+
+        if is_ip_blocked "$src"; then
+            continue
+        fi
+
+        if [ -n "${OPEN_TCP_PORTS[$dst_port]}" ]; then
+            continue
+        fi
+
+        local key="${src}|${dst_port}"
+        if [ -z "${scan_port_times[$key]}" ]; then
+            scan_port_times["$key"]=$current_time
+        fi
+
+        local count=0
+        for k in "${!scan_port_times[@]}"; do
+            if [[ "$k" == "$src|"* ]]; then
+                if [ $((current_time - scan_port_times[$k])) -le "$PORTSCAN_TIME_WINDOW" ]; then
+                    count=$((count + 1))
+                else
+                    unset scan_port_times["$k"]
+                fi
+            fi
+        done
+
+        if [ "$count" -ge "$PORTSCAN_PORT_THRESHOLD" ]; then
+            if block_ip "$src" "端口扫描" "$count" "$PORTSCAN_BLOCK_DURATION"; then
+                echo "$(date '+%Y-%m-%d %H:%M:%S') - 端口扫描封禁: IP=$src, 端口数=$count" >> "$LOG_DIR/portscan.log"
+                echo "🚫 封禁IP: $src" >> "$report_file"
+                echo "   原因: 端口扫描" >> "$report_file"
+                echo "   扫描端口数: $count" >> "$report_file"
+                echo "   封禁时间: $(date '+%Y-%m-%d %H:%M:%S')" >> "$report_file"
+                echo "" >> "$report_file"
+
+                for k in "${!scan_port_times[@]}"; do
+                    if [[ "$k" == "$src|"* ]]; then
+                        unset scan_port_times["$k"]
+                    fi
+                done
+            fi
+        fi
+    done
+}
+
 # 监控SSH登录
 monitor_ssh() {
     echo -e "${BLUE}[*] 开始监控SSH登录...${NC}"
     echo "接收邮箱: $TO_EMAIL"
     echo "报告间隔: ${REPORT_INTERVAL}秒"
     echo "封禁阈值: ${FAILED_THRESHOLD}次/${TIME_WINDOW}秒"
+    echo "端口扫描阈值: ${PORTSCAN_PORT_THRESHOLD}个端口/${PORTSCAN_TIME_WINDOW}秒"
     
     # 找到认证日志文件
     local log_file="/var/log/auth.log"
@@ -336,10 +488,14 @@ monitor_ssh() {
     local last_report_time=$(date +%s)
     local last_cleanup_time=$(date +%s)
     local report_file="/tmp/ssh_report_$$.txt"
+    local portscan_pid=""
     
     # 清理函数
     cleanup() {
         echo -e "\n${YELLOW}[!] 正在停止监控...${NC}"
+        if [ -n "$portscan_pid" ]; then
+            kill "$portscan_pid" 2>/dev/null
+        fi
         rm -f "$report_file"
         echo -e "${GREEN}[✓] 监控已停止${NC}"
         exit 0
@@ -349,6 +505,9 @@ monitor_ssh() {
     
     # 开始监控
     echo -e "${GREEN}[✓] 开始监控，按 Ctrl+C 停止${NC}"
+
+    monitor_port_scans "$report_file" &
+    portscan_pid=$!
     
     tail -n 0 -F "$log_file" | while read line; do
         local current_time=$(date +%s)
@@ -496,7 +655,7 @@ manage_commands() {
             monitor_ssh
             ;;
         "stop")
-            pkill -f "ssh-guardian.sh start"
+            pkill -f "${SCRIPT_NAME} start"
             echo -e "${YELLOW}[!] 已停止监控${NC}"
             ;;
         "status")
@@ -554,6 +713,10 @@ manage_commands() {
             echo "TIME_WINDOW: $TIME_WINDOW"
             echo "BLOCK_DURATION: $BLOCK_DURATION"
             echo "REPORT_INTERVAL: $REPORT_INTERVAL"
+            echo "PORTSCAN_PORT_THRESHOLD: $PORTSCAN_PORT_THRESHOLD"
+            echo "PORTSCAN_TIME_WINDOW: $PORTSCAN_TIME_WINDOW"
+            echo "PORTSCAN_BLOCK_DURATION: $PORTSCAN_BLOCK_DURATION"
+            echo "PORTSCAN_OPEN_PORT_REFRESH: $PORTSCAN_OPEN_PORT_REFRESH"
             echo "WHITELIST_IPS: ${WHITELIST_IPS[*]}"
             echo "LOG_DIR: $LOG_DIR"
             echo "LOCK_DIR: $LOCK_DIR"
