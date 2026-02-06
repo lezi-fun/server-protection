@@ -25,6 +25,14 @@ chmod +x install-ssh-guard.sh
 sudo ./install-ssh-guard.sh
 ```
 
+
+## 卸载
+
+```bash
+wget https://raw.githubusercontent.com/lezi-fun/server-protection/refs/heads/main/uninstall.sh
+sudo bash ./uninstall.sh
+```
+
 ## 使用方式
 
 ```bash

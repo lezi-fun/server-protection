@@ -50,17 +50,20 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
 
-      - name: Package install script
+      - name: Package install/uninstall scripts
         if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'release'
         run: |
           mkdir -p dist
           cp install.sh dist/install-ssh-guard.sh
+          cp uninstall.sh dist/uninstall-ssh-guard.sh
 
-      - name: Upload release asset
+      - name: Upload release assets
         if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'release'
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/install-ssh-guard.sh
+          files: |
+            dist/install-ssh-guard.sh
+            dist/uninstall-ssh-guard.sh
 
       - name: Auto-complete release notes with usage guide
         if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'release'
@@ -115,7 +118,14 @@ jobs:
               `  ghcr.io/${owner}/${repo}:${tag}`,
               '```',
               '',
-              '### 5) 依赖与注意事项',
+              '### 5) 卸载',
+              '```bash',
+              `curl -L https://github.com/${owner}/${repo}/releases/latest/download/uninstall-ssh-guard.sh -o uninstall-ssh-guard.sh`,
+              'chmod +x uninstall-ssh-guard.sh',
+              'sudo ./uninstall-ssh-guard.sh',
+              '```',
+              '',
+              '### 6) 依赖与注意事项',
               '- 需要 root 权限。',
               '- 依赖：iptables、tcpdump、ss 或 netstat。',
               '- 若缺少 tcpdump：端口扫描检测自动禁用。',
