@@ -14,7 +14,8 @@ fi
 
 choose_option() {
     local prompt="$1"
-    shift
+    local output_var="$2"
+    shift 2
     local -a options=("$@")
 
     while true; do
@@ -26,7 +27,7 @@ choose_option() {
         choice="${choice,,}"
         case "$choice" in
             a|b|c)
-                echo "$choice"
+                printf -v "$output_var" '%s' "$choice"
                 return 0
                 ;;
             *)
@@ -78,7 +79,8 @@ uninstall_docker() {
     echo "[✓] docker 模式卸载完成"
 }
 
-UNINSTALL_OPTION=$(choose_option "请选择卸载方式" "a) host (本机安装)" "b) docker (容器部署)" "c) 全部卸载")
+UNINSTALL_OPTION=""
+choose_option "请选择卸载方式" UNINSTALL_OPTION "a) host (本机安装)" "b) docker (容器部署)" "c) 全部卸载"
 case "$UNINSTALL_OPTION" in
     a)
         uninstall_host
